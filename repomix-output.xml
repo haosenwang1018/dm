@@ -1,0 +1,732 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+4. Repository files, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: ./*.py
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+<additional_info>
+
+</additional_info>
+
+</file_summary>
+
+<directory_structure>
+app.py
+config.py
+data_utils.py
+milvus_utils.py
+models.py
+preprocess.py
+rag_core.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="app.py">
+import streamlit as st
+import time
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.environ['HF_HOME'] = './hf_cache' 
+
+
+# Import functions and config from other modules
+from config import (
+    DATA_FILE, EMBEDDING_MODEL_NAME, GENERATION_MODEL_NAME, TOP_K,
+    MAX_ARTICLES_TO_INDEX, MILVUS_LITE_DATA_PATH, COLLECTION_NAME,
+    id_to_doc_map # Import the global map
+)
+from data_utils import load_data
+from models import load_embedding_model, load_generation_model
+# Import the new Milvus Lite functions
+from milvus_utils import get_milvus_client, setup_milvus_collection, index_data_if_needed, search_similar_documents
+from rag_core import generate_answer
+
+# --- Streamlit UI 设置 ---
+st.set_page_config(layout="wide")
+st.title("📄 医疗 RAG 系统 (Milvus Lite)")
+st.markdown(f"使用 Milvus Lite, `{EMBEDDING_MODEL_NAME}`, 和 `{GENERATION_MODEL_NAME}`。")
+
+# --- 初始化与缓存 ---
+# 获取 Milvus Lite 客户端 (如果未缓存则初始化)
+milvus_client = get_milvus_client()
+
+if milvus_client:
+    # 设置 collection (如果未缓存则创建/加载索引)
+    collection_is_ready = setup_milvus_collection(milvus_client)
+
+    # 加载模型 (缓存)
+    embedding_model = load_embedding_model(EMBEDDING_MODEL_NAME)
+    generation_model, tokenizer = load_generation_model(GENERATION_MODEL_NAME)
+
+    # 检查所有组件是否成功加载
+    models_loaded = embedding_model and generation_model and tokenizer
+
+    if collection_is_ready and models_loaded:
+        # 加载数据 (未缓存)
+        pubmed_data = load_data(DATA_FILE)
+
+        # 如果需要则索引数据 (这会填充 id_to_doc_map)
+        if pubmed_data:
+            indexing_successful = index_data_if_needed(milvus_client, pubmed_data, embedding_model)
+        else:
+            st.warning(f"无法从 {DATA_FILE} 加载数据。跳过索引。")
+            indexing_successful = False # 如果没有数据，则视为不成功
+
+        st.divider()
+
+        # --- RAG 交互部分 ---
+        if not indexing_successful and not id_to_doc_map:
+             st.error("数据索引失败或不完整，且没有文档映射。RAG 功能已禁用。")
+        else:
+            query = st.text_input("请提出关于已索引医疗文章的问题:", key="query_input")
+
+            if st.button("获取答案", key="submit_button") and query:
+                start_time = time.time()
+
+                # 1. 搜索 Milvus Lite
+                with st.spinner("正在搜索相关文档..."):
+                    retrieved_ids, distances = search_similar_documents(milvus_client, query, embedding_model)
+
+                if not retrieved_ids:
+                    st.warning("在数据库中找不到相关文档。")
+                else:
+                    # 2. 从映射中检索上下文
+                    retrieved_docs = [id_to_doc_map[id] for id in retrieved_ids if id in id_to_doc_map]
+
+                    if not retrieved_docs:
+                         st.error("检索到的 ID 无法映射到加载的文档。请检查映射逻辑。")
+                    else:
+                        st.subheader("检索到的上下文文档:")
+                        for i, doc in enumerate(retrieved_docs):
+                            # 如果距离可用则显示，否则只显示 ID
+                            dist_str = f", 距离: {distances[i]:.4f}" if distances else ""
+                            with st.expander(f"文档 {i+1} (ID: {retrieved_ids[i]}{dist_str}) - {doc['title'][:60]}"):
+                                st.write(f"**标题:** {doc['title']}")
+                                st.write(f"**摘要:** {doc['abstract']}") # 假设 'abstract' 存储的是文本块
+
+                        st.divider()
+
+                        # 3. 生成答案
+                        st.subheader("生成的答案:")
+                        with st.spinner("正在根据上下文生成答案..."):
+                            answer = generate_answer(query, retrieved_docs, generation_model, tokenizer)
+                            st.write(answer)
+
+                end_time = time.time()
+                st.info(f"总耗时: {end_time - start_time:.2f} 秒")
+
+    else:
+        st.error("加载模型或设置 Milvus Lite collection 失败。请检查日志和配置。")
+else:
+    st.error("初始化 Milvus Lite 客户端失败。请检查日志。")
+
+
+# --- 页脚/信息侧边栏 ---
+st.sidebar.header("系统配置")
+st.sidebar.markdown(f"**向量存储:** Milvus Lite")
+st.sidebar.markdown(f"**数据路径:** `{MILVUS_LITE_DATA_PATH}`")
+st.sidebar.markdown(f"**Collection:** `{COLLECTION_NAME}`")
+st.sidebar.markdown(f"**数据文件:** `{DATA_FILE}`")
+st.sidebar.markdown(f"**嵌入模型:** `{EMBEDDING_MODEL_NAME}`")
+st.sidebar.markdown(f"**生成模型:** `{GENERATION_MODEL_NAME}`")
+st.sidebar.markdown(f"**最大索引数:** `{MAX_ARTICLES_TO_INDEX}`")
+st.sidebar.markdown(f"**检索 Top K:** `{TOP_K}`")
+</file>
+
+<file path="config.py">
+# Milvus Lite Configuration
+MILVUS_LITE_DATA_PATH = "./milvus_lite_data.db" # Path to store Milvus Lite data
+COLLECTION_NAME = "medical_rag_lite" # Use a different name if needed
+
+# Data Configuration
+DATA_FILE = "./data/processed_data.json"
+
+# Model Configuration
+# Example: 'all-MiniLM-L6-v2' (dim 384), 'thenlper/gte-large' (dim 1024)
+EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
+GENERATION_MODEL_NAME = "Qwen/Qwen2.5-0.5B"
+EMBEDDING_DIM = 384 # Must match EMBEDDING_MODEL_NAME
+
+# Indexing and Search Parameters
+MAX_ARTICLES_TO_INDEX = 500
+TOP_K = 3
+# Milvus index parameters (adjust based on data size and needs)
+INDEX_METRIC_TYPE = "L2" # Or "IP"
+INDEX_TYPE = "IVF_FLAT"  # Milvus Lite 支持的索引类型
+# HNSW index params (adjust as needed)
+INDEX_PARAMS = {"nlist": 128}
+# HNSW search params (adjust as needed)
+SEARCH_PARAMS = {"nprobe": 16}
+
+# Generation Parameters
+MAX_NEW_TOKENS_GEN = 512
+TEMPERATURE = 0.7
+TOP_P = 0.9
+REPETITION_PENALTY = 1.1
+
+# Global map to store document content (populated during indexing)
+# Key: document ID (int), Value: dict {'title': str, 'abstract': str, 'content': str}
+id_to_doc_map = {}
+</file>
+
+<file path="data_utils.py">
+import json
+import streamlit as st
+
+def load_data(filepath):
+    """Loads data from the JSON file."""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        st.write(f"Loaded {len(data)} articles from {filepath}")
+        return data
+    except FileNotFoundError:
+        st.error(f"Data file not found: {filepath}")
+        return []
+    except json.JSONDecodeError:
+        st.error(f"Error decoding JSON from file: {filepath}")
+        return []
+    except Exception as e:
+        st.error(f"An error occurred loading data: {e}")
+        return []
+</file>
+
+<file path="milvus_utils.py">
+import streamlit as st
+# Use MilvusClient for Lite version
+from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
+import time
+import os
+
+# Import config variables including the global map
+from config import (
+    MILVUS_LITE_DATA_PATH, COLLECTION_NAME, EMBEDDING_DIM,
+    MAX_ARTICLES_TO_INDEX, INDEX_METRIC_TYPE, INDEX_TYPE, INDEX_PARAMS,
+    SEARCH_PARAMS, TOP_K, id_to_doc_map
+)
+
+@st.cache_resource
+def get_milvus_client():
+    """Initializes and returns a MilvusClient instance for Milvus Lite."""
+    try:
+        st.write(f"Initializing Milvus Lite client with data path: {MILVUS_LITE_DATA_PATH}")
+        # Ensure the directory for the data file exists
+        os.makedirs(os.path.dirname(MILVUS_LITE_DATA_PATH), exist_ok=True)
+        # The client connects to the local file specified
+        client = MilvusClient(uri=MILVUS_LITE_DATA_PATH)
+        st.success("Milvus Lite client initialized!")
+        return client
+    except Exception as e:
+        st.error(f"Failed to initialize Milvus Lite client: {e}")
+        return None
+
+@st.cache_resource
+def setup_milvus_collection(_client):
+    """Ensures the specified collection exists and is set up correctly in Milvus Lite."""
+    if not _client:
+        st.error("Milvus client not available.")
+        return False
+    try:
+        collection_name = COLLECTION_NAME
+        dim = EMBEDDING_DIM
+
+        has_collection = collection_name in _client.list_collections()
+
+        if not has_collection:
+            st.write(f"Collection '{collection_name}' not found. Creating...")
+            # Define fields using new API style if needed (older style might still work)
+            fields = [
+                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim),
+                # You can add other scalar fields directly here for storage
+                FieldSchema(name="content_preview", dtype=DataType.VARCHAR, max_length=500), # Example
+            ]
+            schema = CollectionSchema(fields, f"PubMed Lite RAG (dim={dim})")
+
+            _client.create_collection(
+                collection_name=collection_name,
+                schema=schema # Pass schema directly or define dimension/primary field name
+                # Or simpler:
+                # dimension=dim,
+                # primary_field_name="id",
+                # vector_field_name="embedding",
+                # metric_type=INDEX_METRIC_TYPE
+            )
+            st.write(f"Collection '{collection_name}' created.")
+
+            # Create an index
+            st.write(f"Creating index ({INDEX_TYPE})...")
+            index_params = _client.prepare_index_params()
+            index_params.add_index(
+                field_name="embedding",
+                index_type=INDEX_TYPE,
+                metric_type=INDEX_METRIC_TYPE,
+                params=INDEX_PARAMS
+            )
+            _client.create_index(collection_name, index_params)
+            st.success(f"Index created for collection '{collection_name}'.")
+        else:
+            st.write(f"Found existing collection: '{collection_name}'.")
+            # Optional: Check schema compatibility if needed
+
+        # Determine current entity count (fallback between num_entities and stats)
+        try:
+            if hasattr(_client, 'num_entities'):
+                current_count = _client.num_entities(collection_name)
+            else:
+                stats = _client.get_collection_stats(collection_name)
+                current_count = int(stats.get("row_count", stats.get("rowCount", 0)))
+            st.write(f"Collection '{collection_name}' ready. Current entity count: {current_count}")
+        except Exception:
+            st.write(f"Collection '{collection_name}' ready.")
+
+        return True # Indicate collection is ready
+
+    except Exception as e:
+        st.error(f"Error setting up Milvus collection '{COLLECTION_NAME}': {e}")
+        return False
+
+
+def index_data_if_needed(client, data, embedding_model):
+    """Checks if data needs indexing and performs it using MilvusClient."""
+    global id_to_doc_map # Modify the global map
+
+    if not client:
+        st.error("Milvus client not available for indexing.")
+        return False
+
+    collection_name = COLLECTION_NAME
+    # Retrieve current entity count with fallback
+    try:
+        if hasattr(client, 'num_entities'):
+            current_count = client.num_entities(collection_name)
+        else:
+            stats = client.get_collection_stats(collection_name)
+            current_count = int(stats.get("row_count", stats.get("rowCount", 0)))
+    except Exception:
+        st.write(f"Could not retrieve entity count, attempting to (re)setup collection.")
+        if not setup_milvus_collection(client):
+            return False
+        current_count = 0  # Assume empty after setup
+
+    st.write(f"Entities currently in Milvus collection '{collection_name}': {current_count}")
+
+    data_to_index = data[:MAX_ARTICLES_TO_INDEX] # Limit data for demo
+    needed_count = 0
+    docs_for_embedding = []
+    data_to_insert = [] # List of dictionaries for MilvusClient insert
+    temp_id_map = {} # Build a temporary map first
+
+    # Prepare data
+    with st.spinner("Preparing data for indexing..."):
+        for i, doc in enumerate(data_to_index):
+             title = doc.get('title', '') or ""
+             abstract = doc.get('abstract', '') or ""
+             content = f"Title: {title}\nAbstract: {abstract}".strip()
+             if not content:
+                 continue
+
+             doc_id = i # Use list index as ID
+             needed_count += 1
+             temp_id_map[doc_id] = {
+                 'title': title, 'abstract': abstract, 'content': content
+             }
+             docs_for_embedding.append(content)
+             # Prepare data in dict format for MilvusClient
+             data_to_insert.append({
+                 "id": doc_id,
+                 "embedding": None, # Placeholder, will be filled after encoding
+                 "content_preview": content[:500] # Store preview if field exists
+             })
+
+
+    if current_count < needed_count and docs_for_embedding:
+        st.warning(f"Indexing required ({current_count}/{needed_count} documents found). This may take a while...")
+
+        st.write(f"Embedding {len(docs_for_embedding)} documents...")
+        with st.spinner("Generating embeddings..."):
+            start_embed = time.time()
+            embeddings = embedding_model.encode(docs_for_embedding, show_progress_bar=True)
+            end_embed = time.time()
+            st.write(f"Embedding took {end_embed - start_embed:.2f} seconds.")
+
+        # Fill in the embeddings
+        for i, emb in enumerate(embeddings):
+            data_to_insert[i]["embedding"] = emb
+
+        st.write("Inserting data into Milvus Lite...")
+        with st.spinner("Inserting..."):
+            try:
+                start_insert = time.time()
+                # MilvusClient uses insert() with list of dicts
+                res = client.insert(collection_name=collection_name, data=data_to_insert)
+                # Milvus Lite might automatically flush or sync, explicit flush isn't usually needed/available
+                end_insert = time.time()
+                # 使用 len(data_to_insert) 作为成功插入的数量，因为 res 可能没有 primary_keys 属性
+                inserted_count = len(data_to_insert)
+                st.success(f"Successfully attempted to index {inserted_count} documents. Insert took {end_insert - start_insert:.2f} seconds.")
+                # Update the global map ONLY after successful insertion attempt
+                id_to_doc_map.update(temp_id_map)
+                return True
+            except Exception as e:
+                st.error(f"Error inserting data into Milvus Lite: {e}")
+                return False
+    elif current_count >= needed_count:
+        st.write("Data count suggests indexing is complete.")
+        # Populate the global map if it's empty but indexing isn't needed
+        if not id_to_doc_map:
+            id_to_doc_map.update(temp_id_map)
+        return True
+    else: # No docs_for_embedding found
+         st.error("No valid text content found in the data to index.")
+         return False
+
+
+def search_similar_documents(client, query, embedding_model):
+    """Searches Milvus Lite for documents similar to the query using MilvusClient."""
+    if not client or not embedding_model:
+        st.error("Milvus client or embedding model not available for search.")
+        return [], []
+
+    collection_name = COLLECTION_NAME
+    try:
+        query_embedding = embedding_model.encode([query])[0]
+
+        # 重写search调用，使用更兼容的方式
+        search_params = {
+            "collection_name": collection_name,
+            "data": [query_embedding],
+            "anns_field": "embedding",
+            "limit": TOP_K,
+            "output_fields": ["id"]
+        }
+        
+        # 尝试不同的方式传递搜索参数
+        if hasattr(client, 'search_with_params'):
+            # 如果存在专门的方法
+            res = client.search_with_params(**search_params, search_params=SEARCH_PARAMS)
+        else:
+            # 标准方法，直接设置参数（当前版本会导致参数冲突）
+            try:
+                # 尝试1：不传递param参数
+                res = client.search(**search_params)
+            except Exception as e1:
+                st.warning(f"搜索尝试1失败: {e1}，将尝试备用方法...")
+                try:
+                    # 尝试2：通过搜索参数关键字传递
+                    res = client.search(**search_params, **SEARCH_PARAMS)
+                except Exception as e2:
+                    st.warning(f"搜索尝试2失败: {e2}，将尝试最后一种方法...")
+                    # 尝试3：结合参数
+                    final_params = search_params.copy()
+                    final_params["nprobe"] = SEARCH_PARAMS.get("nprobe", 16)
+                    res = client.search(**final_params)
+
+        # Process results (structure might differ slightly)
+        # client.search returns a list of lists of hits (one list per query vector)
+        if not res or not res[0]:
+            return [], []
+
+        hit_ids = [hit['id'] for hit in res[0]]
+        distances = [hit['distance'] for hit in res[0]]
+        return hit_ids, distances
+    except Exception as e:
+        st.error(f"Error during Milvus Lite search: {e}")
+        return [], []
+</file>
+
+<file path="models.py">
+import streamlit as st
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+
+@st.cache_resource
+def load_embedding_model(model_name):
+    """Loads the sentence transformer model."""
+    st.write(f"Loading embedding model: {model_name}...")
+    try:
+        model = SentenceTransformer(model_name)
+        st.success("Embedding model loaded.")
+        return model
+    except Exception as e:
+        st.error(f"Failed to load embedding model: {e}")
+        return None
+
+@st.cache_resource
+def load_generation_model(model_name):
+    """Loads the Hugging Face generative model and tokenizer."""
+    st.write(f"Loading generation model: {model_name}...")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        # Adjust device_map and torch_dtype based on your hardware
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            device_map="auto", # Use 'cpu' if no GPU or driver issues
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+        )
+        if tokenizer.pad_token is None:
+             tokenizer.pad_token = tokenizer.eos_token
+        st.success("Generation model and tokenizer loaded.")
+        return model, tokenizer
+    except Exception as e:
+        st.error(f"Failed to load generation model: {e}")
+        return None, None
+</file>
+
+<file path="preprocess.py">
+import os
+import json
+from bs4 import BeautifulSoup
+import re
+
+def extract_text_and_title_from_html(html_filepath):
+    """
+    从指定的 HTML 文件中提取标题和正文文本。
+
+    Args:
+        html_filepath (str): HTML 文件的路径。
+
+    Returns:
+        tuple: (标题, 正文文本) 或 (None, None) 如果失败。
+    """
+    try:
+        with open(html_filepath, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+
+        soup = BeautifulSoup(html_content, 'lxml') # 或者使用 'html.parser'
+
+        # --- 提取标题 ---
+        title_tag = soup.find('title')
+        title_string = title_tag.string if title_tag else None
+        # 确保 title_string 不为 None 才调用 strip()
+        title = title_string.strip() if title_string else os.path.basename(html_filepath)
+        title = title.replace('.html', '') # 清理标题
+
+        # --- 定位正文内容 ---
+        # 根据之前的讨论，优先查找 <content> 或特定 class
+        content_tag = soup.find('content')
+        if not content_tag:
+            content_tag = soup.find('div', class_='rich_media_content') # 微信文章常见
+        if not content_tag:
+            content_tag = soup.find('article') # HTML5 语义标签
+        if not content_tag:
+            content_tag = soup.find('main') # HTML5 语义标签
+        if not content_tag:
+             content_tag = soup.find('body') # 最后尝试 body
+
+        if content_tag:
+            # 获取文本，尝试保留段落换行符
+            text = content_tag.get_text(separator='\n', strip=True)
+            # 移除多余的空行
+            text = re.sub(r'\n\s*\n', '\n', text).strip()
+            # 可选：进一步清理特定模式（如广告、页脚等）
+            text = text.replace('阅读原文', '').strip()
+            return title, text
+        else:
+            print(f"警告：在文件 {html_filepath} 中未找到明确的正文标签。")
+            return title, None # 返回标题，但文本为 None
+
+    except FileNotFoundError:
+        print(f"错误：文件 {html_filepath} 未找到。")
+        return None, None
+    except Exception as e:
+        print(f"处理文件 {html_filepath} 时出错: {e}")
+        return None, None
+
+def split_text(text, chunk_size=500, chunk_overlap=50):
+    """
+    将文本分割成指定大小的块，并带有重叠。
+
+    Args:
+        text (str): 要分割的文本。
+        chunk_size (int): 每个块的目标字符数。
+        chunk_overlap (int): 相邻块之间的重叠字符数。
+
+    Returns:
+        list[str]: 文本块列表。
+    """
+    if not text:
+        return []
+
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - chunk_overlap
+        if start >= len(text): # 避免无限循环（如果 overlap >= size）
+             break
+        # 如果最后一块太短，并且有重叠，可能导致重复添加，确保不重复
+        if start < chunk_size and len(chunks)>1 and chunks[-1] == chunks[-2][chunk_size-chunk_overlap:]:
+             chunks.pop() # 移除重复的小尾巴
+             start = len(text) # 强制结束
+
+    # 处理最后一块可能不足 chunk_size 的情况
+    if start < len(text) and start > 0 : # 确保不是第一个块就小于size
+         last_chunk = text[start-chunk_size+chunk_overlap:]
+         if chunks and last_chunk != chunks[-1]: # 避免重复添加完全相同的最后一块
+            # 检查是否和上一个块的尾部重复太多
+            if not chunks[-1].endswith(last_chunk):
+                 chunks.append(last_chunk)
+         elif not chunks: # 如果是唯一一块且小于size
+             chunks.append(last_chunk)
+
+
+    # 更简洁的实现 (可能需要微调确保边界情况)
+    # chunks = []
+    # for i in range(0, len(text), chunk_size - chunk_overlap):
+    #     chunk = text[i:i + chunk_size]
+    #     if chunk: # 确保不添加空块
+    #         chunks.append(chunk)
+    # # 确保最后一部分被包含 (如果上面步长导致遗漏)
+    # if chunks and len(text) > (len(chunks) -1) * (chunk_size - chunk_overlap) + chunk_size :
+    #      last_start = (len(chunks) -1) * (chunk_size - chunk_overlap)
+    #      final_chunk = text[last_start:]
+    #      if final_chunk != chunks[-1]: # 避免重复
+    #          # 可以考虑合并最后两个块如果最后一个太小，或直接添加
+    #           if len(final_chunk) > chunk_overlap : # 避免添加太小的重叠部分
+    #               chunks.append(final_chunk[overlap:]) # 只添加新的部分? 或者完整添加? 取决于需求
+    #               # 简单起见，先完整添加
+    #               chunks.append(text[last_start + chunk_size - chunk_overlap:])
+
+
+    return [c.strip() for c in chunks if c.strip()] # 返回非空块
+
+# --- 配置 ---
+html_directory = './data/' # **** 修改为你的 HTML 文件夹路径 ****
+output_json_path = './data/processed_data.json' # **** 输出 JSON 文件路径 ****
+CHUNK_SIZE = 512  # 每个文本块的目标大小（字符数）
+CHUNK_OVERLAP = 50 # 相邻文本块的重叠大小（字符数）
+
+# --- 主处理逻辑 ---
+all_data_for_milvus = []
+file_count = 0
+chunk_count = 0
+
+print(f"开始处理目录 '{html_directory}' 中的 HTML 文件...")
+
+# 确保输出目录存在
+os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+
+html_files = [f for f in os.listdir(html_directory) if f.endswith('.html')]
+print(f"找到 {len(html_files)} 个 HTML 文件。")
+
+for filename in html_files:
+    filepath = os.path.join(html_directory, filename)
+    print(f"  处理文件: {filename} ...")
+    file_count += 1
+
+    title, main_text = extract_text_and_title_from_html(filepath)
+
+    if main_text:
+        chunks = split_text(main_text, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        print(f"    提取到文本，分割成 {len(chunks)} 个块。")
+
+        for i, chunk in enumerate(chunks):
+            chunk_count += 1
+            # 构建符合 milvus_utils.py 期望的字典结构
+            milvus_entry = {
+                "id": f"{filename}_{i}", # 创建一个唯一的 ID (文件名 + 块索引)
+                "title": title or filename, # 使用提取的标题或文件名
+                "abstract": chunk, # 将文本块放入 'abstract' 字段
+                "source_file": filename, # 添加原始文件名以供参考
+                "chunk_index": i
+            }
+            all_data_for_milvus.append(milvus_entry)
+    else:
+        print(f"    警告：未能从 {filename} 提取有效文本内容。")
+
+print(f"\n处理完成。共处理 {file_count} 个文件，生成 {chunk_count} 个文本块。")
+
+# --- 保存为 JSON ---
+try:
+    with open(output_json_path, 'w', encoding='utf-8') as f:
+        json.dump(all_data_for_milvus, f, ensure_ascii=False, indent=4)
+    print(f"结果已保存到: {output_json_path}")
+except Exception as e:
+    print(f"错误：无法写入 JSON 文件 {output_json_path}: {e}")
+</file>
+
+<file path="rag_core.py">
+import streamlit as st
+import torch
+from config import MAX_NEW_TOKENS_GEN, TEMPERATURE, TOP_P, REPETITION_PENALTY
+
+def generate_answer(query, context_docs, gen_model, tokenizer):
+    """Generates an answer using the LLM based on query and context."""
+    if not context_docs:
+        return "I couldn't find relevant documents to answer your question."
+    if not gen_model or not tokenizer:
+         st.error("Generation model or tokenizer not available.")
+         return "Error: Generation components not loaded."
+
+    context = "\n\n---\n\n".join([doc['content'] for doc in context_docs]) # Combine retrieved docs
+
+    prompt = f"""Based ONLY on the following context documents, answer the user's question.
+If the answer is not found in the context, state that clearly. Do not make up information.
+
+Context Documents:
+{context}
+
+User Question: {query}
+
+Answer:
+"""
+    try:
+        inputs = tokenizer(prompt, return_tensors="pt").to(gen_model.device)
+        with torch.no_grad():
+            outputs = gen_model.generate(
+                **inputs,
+                max_new_tokens=MAX_NEW_TOKENS_GEN,
+                temperature=TEMPERATURE,
+                top_p=TOP_P,
+                repetition_penalty=REPETITION_PENALTY,
+                pad_token_id=tokenizer.eos_token_id # Important for open-end generation
+            )
+        # Decode only the newly generated tokens, excluding the prompt
+        response = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        return response.strip()
+    except Exception as e:
+        st.error(f"Error during text generation: {e}")
+        return "Sorry, I encountered an error while generating the answer."
+</file>
+
+</files>
